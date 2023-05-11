@@ -1,7 +1,0 @@
-torch==1.9
-e3nn==0.3.3
-pynvml==11.0.0
-decorator==5.1.0
-icecream
-biopython
-py3Dmol
