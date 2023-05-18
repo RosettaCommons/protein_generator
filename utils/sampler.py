@@ -775,7 +775,7 @@ class SEQDIFF_sampler:
         # save trajectory
         if self.args['save_all_steps']:
             fname = f'{self.out_prefix}_trajectory.pt'
-            torch.save(self.trajecotry, fname)
+            torch.save(self.trajectory, fname)
         
         # get items from best plddt step
         if self.args['save_best_plddt']:
@@ -1218,7 +1218,7 @@ class cleavage_foldswitch_SAMPLER(SEQDIFF_sampler):
         # save trajectory
         if self.args['save_all_steps']:
             fname = f'{self.out_prefix}_trajectory.pt'
-            torch.save(self.trajecotry, fname)
+            torch.save(self.trajectory, fname)
 
         # get items from best plddt step
         if self.args['save_best_plddt']:
