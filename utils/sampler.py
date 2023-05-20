@@ -292,11 +292,15 @@ class SEQDIFF_sampler:
             for x in self.args['sequence']: assert x in allowable_aas, f'Amino Acid {x} is undefinded, please only use standart 20 AAs'
             self.features['seq'] = torch.tensor([self.conversion.index(x) for x in self.args['sequence']])
             self.features['xyz_t'] = torch.full((1,1,len(self.args['sequence']),27,3), np.nan)
-
             self.features['mask_str'] = torch.zeros(len(self.args['sequence'])).long()[None,:].bool()
-            self.features['mask_seq'] = torch.tensor([0 if x == 'X' else 1 for x in self.args['sequence']]).long()[None,:].bool()
-            self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
+            
+            #added check for if in partial diffusion mode will mask
+            if self.args['sampling_temp'] == 1.0:
+                self.features['mask_seq'] = torch.tensor([0 if x == 'X' else 1 for x in self.args['sequence']]).long()[None,:].bool()
+            else:
+                self.features['mask_seq'] = torch.zeros(len(self.args['sequence'])).long()[None,:].bool()
 
+            self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
             self.features['idx_pdb'] = torch.tensor([i for i in range(len(self.args['sequence']))])[None,:]
             conf_1d = torch.ones_like(self.features['seq'])
             conf_1d[~self.features['mask_str'][0]] = 0
