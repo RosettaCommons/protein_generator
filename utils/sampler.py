@@ -596,6 +596,42 @@ class SEQDIFF_sampler:
         self.features['pair_prev'],
         self.features['state_prev'])
     
+    def predict_final_symmetric(self):
+        '''
+            ensure symmetrization with one final prediction
+        '''
+
+        print('symmetrizing output seq.....') 
+        
+        # take argmaxed seq and make one hot
+        if self.args['save_best_plddt']:
+            sym_seq = torch.clone(self.features['best_seq'])
+        else:
+            sym_seq = torch.clone(self.features['seq'])
+
+        # symmetrize
+        sym_seq = self.symmetrize_seq(sym_seq[:,None]).squeeze(-1)
+
+        sym_seq_hot = torch.nn.functional.one_hot(sym_seq, num_classes=22).float()*2-1
+
+        # match other features to seq diffused
+        self.features['seq'] = sym_seq[None,None]
+        self.features['seq_diffused'] = sym_seq_hot[None]
+        self.features['msa_masked'][:,:,:,:,:22] = sym_seq_hot
+        self.features['msa_masked'][:,:,:,:,22:44] = sym_seq_hot
+        self.features['msa_full'][:,:,:,:,:22] = sym_seq_hot
+        self.features['t1d'][:1,:,:,22] = 1 # timestep
+        self.features['t1d'][:1,:,:,21] = 1 # seq confidence (set to 1 because dont want to change)
+
+        self.predict_x()
+
+        self.features['seq_out'] = torch.permute(self.features['logit_aa_s'][0], (1,0))
+        self.features['best_seq'] = torch.argmax(torch.clone(self.features['seq_out']), dim=-1)
+        self.features['best_pred_lddt'] = torch.clone(self.features['pred_lddt'])
+        self.features['best_xyz'] = torch.clone(self.features['xyz'])
+        self.features['best_plddt'] = self.features['pred_lddt'][~self.features['mask_seq']].mean().item()
+
+
     def self_condition_seq(self):
         '''
             get previous logits and set at t1d template
@@ -755,12 +791,17 @@ class SEQDIFF_sampler:
             # noise to X_t-1
             if self.t != 0:
                 self.noise_x()
-            
+           
+
             print(''.join([self.conversion[i] for i in torch.argmax(self.features['seq_out'],dim=-1)]))
             print ("    TIMESTEP [%02d/%02d]   |   current PLDDT: %.4f   <<  >>   best PLDDT: %.4f"%(
                     self.t+1, self.args['T'], self.features['pred_lddt'].mean().item(), 
                     self.features['best_pred_lddt'].mean().item()))
         
+        # extra pass to ensure symmetrization
+        if self.features['sym'] > 1:
+            self.predict_final_symmetric()
+
         # record time
         self.delta_time = time.time() - self.start_time
         
@@ -780,7 +821,10 @@ class SEQDIFF_sampler:
         if self.args['save_all_steps']:
             fname = f'{self.out_prefix}_trajectory.pt'
             torch.save(self.trajectory, fname)
+       
+        # if running in symmetry mode an extra pass through the model will happen to ensure that the sequece is fully symmetrized
         
+
         # get items from best plddt step
         if self.args['save_best_plddt']:
             self.features['seq'] = torch.clone(self.features['best_seq'])
