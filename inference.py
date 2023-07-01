@@ -41,14 +41,6 @@ def get_args():
             help='Number of designs to make')
     parser.add_argument('--start_num', type=int, default=0,
             help='Number of first design to output')
-    parser.add_argument('--multi_templates',type=str,default=None,
-            help='Split contig into multiple templates (to remove inter-domain information). Syntax: A1-100,C1-40:B1-50 puts A and C in one template, B on a different template')
-    parser.add_argument('--multi_tmpl_conf',type=str,default=None,
-            help='Template confidence for each template (as specified in --multi_templates flat). Syntax is e.g. 1,1,0.5')
-    parser.add_argument('--temperature',type=float,default=0.1,
-            help='Softmax temperature for autoregressive sequence decoding')
-    parser.add_argument('--min_decoding_distance',type=int,default=15,
-            help='Minimum distance between residues being simultaneously decoded')
     parser.add_argument('--sampler',type=str, default='default',
             help='Type of sampler to use')
 
@@ -69,17 +61,6 @@ def get_args():
     parser.add_argument('--cautious', default=False, action='store_true',
             help='If true, will not run a design if output file already exists.')
 
-    # specific contig arguments. Don't use unless you REALLY know what you're doing. TODO implement actually using these
-    parser.add_argument('--ref_idx', default=None, type=str,
-        help='pdb indexing in the reference. Gap is given by ("_","_")')
-    parser.add_argument('--hal_idx',default=None,type=str,
-        help='pdb indexing in the output')
-    parser.add_argument('--idx_rf',default=None, type=str,
-        help='indexing for rosettafold')
-    parser.add_argument('--inpaint_seq_tensor', default=None, type=str,
-        help='Boolean list of whether residues have sequence masked')
-    parser.add_argument('--inpaint_str_tensor',default=None, type=str,
-        help='Boolean list of whether residues have structure masked')
 
     #diffusion args
     parser.add_argument('--T', default=25, type=int,
@@ -104,6 +85,8 @@ def get_args():
         help='Integer specifying sequence repeat symmetry, e.g. 4 -> sequence composed of 4 identical repeats')
     parser.add_argument('--symmetry_cap', default=0, type=int,
         help='length for symmetry cap; assumes cap will be helix')
+    parser.add_argument('--predict_symmetric', default=False, action='store_true',
+        help='Predict explicit symmetrization after the last step')
 
     parser.add_argument('--frac_seq_to_weight', default=0.0, type=float,
         help='fraction of sequence to add AA weight bias too (will be randomly sampled)')

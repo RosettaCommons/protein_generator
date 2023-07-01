@@ -74,4 +74,5 @@
     "potentials": null,
     "sequence": "",
     "sampler": "default"
+    "predict_symmetric":"false"
 }

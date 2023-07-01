@@ -270,7 +270,7 @@ class SEQDIFF_sampler:
         self.features = {}
         
         # set up params
-        self.loader_params = {'MAXCYCLE':self.args['n_cycle'],'TEMPERATURE':self.args['temperature'], 'DISTANCE':self.args['min_decoding_distance']}
+        self.loader_params = {'MAXCYCLE':self.args['n_cycle']}
 
         # symmetry
         self.features['sym'] = self.args['symmetry']
@@ -335,10 +335,8 @@ class SEQDIFF_sampler:
             
             # generate contig map
             self.features['rm'] = ContigMap(self.features['parsed_pdb'], self.args['contigs'], 
-                                            self.args['inpaint_seq'], self.args['inpaint_str'], 
-                                            self.args['length'], self.args['ref_idx'],
-                                            self.args['hal_idx'], self.args['idx_rf'], 
-                                            self.args['inpaint_seq_tensor'], self.args['inpaint_str_tensor'])
+                                            self.args['inpaint_seq'], self.args['inpaint_str'])
+
             self.features['mappings'] = get_mappings(self.features['rm'])
 
             self.features['pdb_idx'] = self.features['rm'].hal
@@ -799,9 +797,9 @@ class SEQDIFF_sampler:
                     self.features['best_pred_lddt'].mean().item()))
         
         # extra pass to ensure symmetrization
-        if self.features['sym'] > 1:
+        if self.features['sym'] > 1 and self.args['predict_symmetric']:
             self.predict_final_symmetric()
-
+        
         # record time
         self.delta_time = time.time() - self.start_time
         
