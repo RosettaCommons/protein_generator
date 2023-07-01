@@ -73,6 +73,6 @@
     "save_args": false,
     "potentials": null,
     "sequence": "",
-    "sampler": "default"
+    "sampler": "default",
     "predict_symmetric":"false"
 }
