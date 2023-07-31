@@ -212,25 +212,25 @@ class SEQDIFF_sampler:
             get model set up and choose checkpoint
         '''
        
+        self.MODEL_PARAM['d_t1d'] = self.args['d_t1d']
 
         if self.args['checkpoint'] == None:
             self.args['checkpoint'] = DEFAULT_CKPT
+                
+            # decide based on input args what checkpoint to load
+            if self.args['hotspots'] != None or self.args['secondary_structure'] != None \
+                or (self.args['helix_bias'] + self.args['strand_bias'] + self.args['loop_bias']) > 0 \
+                or self.args['dssp_pdb'] != None:
+                
+                self.MODEL_PARAM['d_t1d'] = 29
+                print('You are using features only compatible with a newer model, switching checkpoint...')
+                self.args['checkpoint'] = t1d_29_CKPT
+            
+            elif self.args['loop_design'] and self.args['checkpoint'] == DEFAULT_CKPT:
+                print('Switched to loop design checkpoint')
+                self.args['checkpoint'] = LOOP_CHECKPOINT
+        
 
-        self.MODEL_PARAM['d_t1d'] = self.args['d_t1d']
-        
-        # decide based on input args what checkpoint to load
-        if self.args['hotspots'] != None or self.args['secondary_structure'] != None \
-            or (self.args['helix_bias'] + self.args['strand_bias'] + self.args['loop_bias']) > 0 \
-            or self.args['dssp_pdb'] != None and self.args['checkpoint'] == DEFAULT_CKPT:
-            
-            self.MODEL_PARAM['d_t1d'] = 29
-            print('You are using features only compatible with a newer model, switching checkpoint...')
-            self.args['checkpoint'] = t1d_29_CKPT
-        
-        elif self.args['loop_design'] and self.args['checkpoint'] == DEFAULT_CKPT:
-            print('Switched to loop design checkpoint')
-            self.args['checkpoint'] = LOOP_CHECKPOINT
-            
         # check to make sure checkpoint chosen exists
         if not os.path.exists(self.args['checkpoint']):
             print('WARNING: couldn\'t find checkpoint')
@@ -890,7 +890,7 @@ class SEQDIFF_sampler:
         '''
 
         with open(f'{self.out_prefix}_args.json','w') as f_out:
-            json.dump(self.args, f_out)
+            json.dump(self.args, f_out, indent=4)
 
 #####################################################################
 ###################### science is cool ##############################
@@ -926,6 +926,198 @@ class cleavage_foldswitch_SAMPLER(SEQDIFF_sampler):
         
         self.child_a_len = self.features['a_dssp_feat'].shape[0]
         
+    def feature_init(self):
+        '''
+            featurize pdb and contigs and choose type of diffusion
+        '''
+        # initialize features dictionary for all example features
+        self.features = {}
+        
+        # set up params
+        self.loader_params = {'MAXCYCLE':self.args['n_cycle']}
+
+        # symmetry
+        self.features['sym'] = self.args['symmetry']
+        self.features['cap'] = self.args['symmetry_cap']
+        self.features['cap_dssp'] = [self.dssp_dict[x.upper()] for x in 'H'*self.features['cap']]
+        if self.features['sym'] > 1:
+            print(f"Input sequence symmetry {self.features['sym']}")
+       
+        assert (self.args['contigs'] in [('0'),(0),['0'],[0]] ) ^ (self.args['sequence'] in ['',None]),\
+                f'You are specifying contigs ({self.args["contigs"]}) and sequence ({self.args["sequence"]})  (or neither), please specify one or the other'
+        
+        # initialize trb dictionary
+        self.features['trb_d'] = {}
+        
+        if self.args['pdb'] == None and self.args['sequence'] not in ['', None]:
+            print('Preparing sequence input')
+
+            allowable_aas = [x for x in self.conversion[:-1]]
+            for x in self.args['sequence']: assert x in allowable_aas, f'Amino Acid {x} is undefinded, please only use standart 20 AAs'
+            self.features['seq'] = torch.tensor([self.conversion.index(x) for x in self.args['sequence']])
+            self.features['xyz_t'] = torch.full((1,1,len(self.args['sequence']),27,3), np.nan)
+            self.features['mask_str'] = torch.zeros(len(self.args['sequence'])).long()[None,:].bool()
+            
+            #added check for if in partial diffusion mode will mask
+            if self.args['sampling_temp'] == 1.0:
+                self.features['mask_seq'] = torch.tensor([0 if x == 'X' else 1 for x in self.args['sequence']]).long()[None,:].bool()
+            else:
+                self.features['mask_seq'] = torch.zeros(len(self.args['sequence'])).long()[None,:].bool()
+
+            self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
+            self.features['idx_pdb'] = torch.tensor([i for i in range(len(self.args['sequence']))])[None,:]
+            conf_1d = torch.ones_like(self.features['seq'])
+            conf_1d[~self.features['mask_str'][0]] = 0
+            self.features['seq_hot'], self.features['msa'], \
+                self.features['msa_hot'], self.features['msa_extra_hot'], _ = MSAFeaturize_fixbb(self.features['seq'][None,:],self.loader_params)
+            self.features['t1d'] = TemplFeaturizeFixbb(self.features['seq'], conf_1d=conf_1d)[None,None,:]
+            self.features['seq_hot'] = self.features['seq_hot'].unsqueeze(dim=0)
+            self.features['msa'] = self.features['msa'].unsqueeze(dim=0)
+            self.features['msa_hot'] = self.features['msa_hot'].unsqueeze(dim=0)
+            self.features['msa_extra_hot'] = self.features['msa_extra_hot'].unsqueeze(dim=0)
+        
+            self.max_t = int(self.args['T']*self.args['sampling_temp'])
+            
+            self.features['pdb_idx'] = [('A',i+1) for i in range(len(self.args['sequence']))]
+            self.features['trb_d']['inpaint_str'] = self.features['mask_str'][0]
+            self.features['trb_d']['inpaint_seq'] = self.features['mask_seq'][0]
+
+        else:
+            
+            assert not (self.args['pdb'] == None and self.args['sampling_temp'] != 1.0),\
+                    f'You must specify a pdb if attempting to use contigs with partial diffusion, else partially diffuse sequence input'
+            
+            if self.args['pdb'] == None:
+                self.features['parsed_pdb'] = {'seq':np.zeros((1),'int64'),
+                                                'xyz':np.zeros((1,27,3),'float32'),
+                                                'idx':np.zeros((1),'int64'),
+                                                'mask':np.zeros((1,27), bool),
+                                                'pdb_idx':['A',1]}
+            else:
+                # parse input pdb
+                self.features['parsed_pdb'] = parsers.parse_pdb(self.args['pdb'])
+            
+            # generate contig map
+            self.features['rm'] = ContigMap(self.features['parsed_pdb'], self.args['contigs'], 
+                                            self.args['inpaint_seq'], self.args['inpaint_str'])
+
+            self.features['mappings'] = get_mappings(self.features['rm'])
+
+            self.features['pdb_idx'] = self.features['rm'].hal
+
+                ### PREPARE FEATURES DEPENDING ON TYPE OF ARGUMENTS SPECIFIED ###
+            
+            # FULL DIFFUSION MODE
+            if self.args['trb'] == None and self.args['sampling_temp'] == 1.0:
+                # process contigs and generate masks
+                self.features['mask_str'] = torch.from_numpy(self.features['rm'].inpaint_str)[None,:]
+                self.features['mask_seq'] = torch.from_numpy(self.features['rm'].inpaint_seq)[None,:]
+                self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
+
+                seq_input = torch.from_numpy(self.features['parsed_pdb']['seq'])
+                xyz_input = torch.from_numpy(self.features['parsed_pdb']['xyz'][:,:,:])
+
+                self.features['xyz_t'] = torch.full((1,1,len(self.features['rm'].ref),27,3), np.nan)
+                self.features['xyz_t'][:,:,self.features['rm'].hal_idx0,:14,:] = xyz_input[self.features['rm'].ref_idx0,:14,:][None, None,...]
+                self.features['seq'] = torch.full((1,len(self.features['rm'].ref)),20).squeeze()
+                self.features['seq'][self.features['rm'].hal_idx0] = seq_input[self.features['rm'].ref_idx0]
+                
+                # template confidence 
+                conf_1d = torch.ones_like(self.features['seq'])*float(self.args['tmpl_conf'])
+                conf_1d[~self.features['mask_str'][0]] = 0 # zero confidence for places where structure is masked
+                seq_masktok = torch.where(self.features['seq'] == 20, 21, self.features['seq'])
+
+                # Get sequence and MSA input features 
+                self.features['seq_hot'], self.features['msa'], \
+                    self.features['msa_hot'], self.features['msa_extra_hot'], _ = MSAFeaturize_fixbb(seq_masktok[None,:],self.loader_params)
+                self.features['t1d'] = TemplFeaturizeFixbb(self.features['seq'], conf_1d=conf_1d)[None,None,:]
+                self.features['idx_pdb'] = torch.from_numpy(np.array(self.features['rm'].rf)).int()[None,:]
+                self.features['seq_hot'] = self.features['seq_hot'].unsqueeze(dim=0)
+                self.features['msa'] = self.features['msa'].unsqueeze(dim=0)
+                self.features['msa_hot'] = self.features['msa_hot'].unsqueeze(dim=0)
+                self.features['msa_extra_hot'] = self.features['msa_extra_hot'].unsqueeze(dim=0)
+
+                self.max_t = int(self.args['T']*self.args['sampling_temp'])
+            
+            # PARTIAL DIFFUSION MODE, NO INPUT TRB
+            elif self.args['trb'] != None:
+                print('Running in partial diffusion mode . . .')
+                self.features['trb_d'] = np.load(self.args['trb'], allow_pickle=True)
+                self.features['mask_str'] = self.features['trb_d']['inpaint_str'].clone()[None,:]
+                self.features['mask_seq'] = self.features['trb_d']['inpaint_seq'].clone()[None,:]
+                self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
+
+                self.features['seq'] = torch.from_numpy(self.features['parsed_pdb']['seq'])
+                self.features['xyz_t'] = torch.from_numpy(self.features['parsed_pdb']['xyz'][:,:,:])[None,None,...]
+
+                if self.features['mask_seq'].shape[1] == 0:
+                    self.features['mask_seq'] = torch.zeros(self.features['seq'].shape[0])[None].bool()
+                if self.features['mask_str'].shape[1] == 0:
+                    self.features['mask_str'] = torch.zeros(self.features['xyz_t'].shape[2])[None].bool()
+
+                idx_pdb = []
+                chains_used = [self.features['parsed_pdb']['pdb_idx'][0][0]]
+                idx_jump = 0
+                for i,x in enumerate(self.features['parsed_pdb']['pdb_idx']):
+                    if x[0] not in chains_used:
+                        chains_used.append(x[0])
+                        idx_jump += 200
+                    idx_pdb.append(idx_jump+i)
+                    
+                self.features['idx_pdb'] = torch.tensor(idx_pdb)[None,:]
+                conf_1d = torch.ones_like(self.features['seq'])
+                conf_1d[~self.features['mask_str'][0]] = 0
+                self.features['seq_hot'], self.features['msa'], \
+                    self.features['msa_hot'], self.features['msa_extra_hot'], _ = MSAFeaturize_fixbb(self.features['seq'][None,:],self.loader_params)
+                self.features['t1d'] = TemplFeaturizeFixbb(self.features['seq'], conf_1d=conf_1d)[None,None,:]
+                self.features['seq_hot'] = self.features['seq_hot'].unsqueeze(dim=0)
+                self.features['msa'] = self.features['msa'].unsqueeze(dim=0)
+                self.features['msa_hot'] = self.features['msa_hot'].unsqueeze(dim=0)
+                self.features['msa_extra_hot'] = self.features['msa_extra_hot'].unsqueeze(dim=0)
+                
+                self.max_t = int(self.args['T']*self.args['sampling_temp'])
+                
+            else:
+                print('running in partial diffusion mode, with no trb input, diffusing whole input')
+                self.features['seq'] = torch.from_numpy(self.features['parsed_pdb']['seq'])
+                self.features['xyz_t'] = torch.from_numpy(self.features['parsed_pdb']['xyz'][:,:,:])[None,None,...]
+
+                if self.args['contigs'] in [('0'),(0),['0'],[0]]:
+                    print('no contigs given partially diffusing everything')
+                    self.features['mask_str'] = torch.zeros(self.features['xyz_t'].shape[2]).long()[None,:].bool()
+                    self.features['mask_seq'] = torch.zeros(self.features['seq'].shape[0]).long()[None,:].bool()
+                    self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
+                else:
+                    print('found contigs setting up masking for partial diffusion')
+                    self.features['mask_str'] = torch.from_numpy(self.features['rm'].inpaint_str)[None,:]
+                    self.features['mask_seq'] = torch.from_numpy(self.features['rm'].inpaint_seq)[None,:]
+                    self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
+
+                idx_pdb = []
+                chains_used = [self.features['parsed_pdb']['pdb_idx'][0][0]]
+                idx_jump = 0
+                for i,x in enumerate(self.features['parsed_pdb']['pdb_idx']):
+                    if x[0] not in chains_used:
+                        chains_used.append(x[0])
+                        idx_jump += 200
+                    idx_pdb.append(idx_jump+i)
+
+                self.features['idx_pdb'] = torch.tensor(idx_pdb)[None,:]
+                conf_1d = torch.ones_like(self.features['seq'])
+                conf_1d[~self.features['mask_str'][0]] = 0
+                self.features['seq_hot'], self.features['msa'], \
+                    self.features['msa_hot'], self.features['msa_extra_hot'], _ = MSAFeaturize_fixbb(self.features['seq'][None,:],self.loader_params)
+                self.features['t1d'] = TemplFeaturizeFixbb(self.features['seq'], conf_1d=conf_1d)[None,None,:]
+                self.features['seq_hot'] = self.features['seq_hot'].unsqueeze(dim=0)
+                self.features['msa'] = self.features['msa'].unsqueeze(dim=0)
+                self.features['msa_hot'] = self.features['msa_hot'].unsqueeze(dim=0)
+                self.features['msa_extra_hot'] = self.features['msa_extra_hot'].unsqueeze(dim=0)
+            
+                self.max_t = int(self.args['T']*self.args['sampling_temp'])
+            
+        # set L
+        self.features['L'] = self.features['seq'].shape[0]
+
 
     def setup(self, init_model=True):
         '''
@@ -1324,3 +1516,41 @@ class cleavage_foldswitch_SAMPLER(SEQDIFF_sampler):
 
         if self.args['save_args']:
             self.save_args()
+
+
+
+
+class grad_test_SAMPLER(SEQDIFF_sampler):
+
+    def __init__(self, args=None):
+        super().__init__(args)
+    
+    def predict_x(self):
+        '''
+            take step using X_t-1 features to predict Xo
+        '''
+        self.features['seq'], \
+        self.features['xyz'], \
+        self.features['pred_lddt'], \
+        self.features['logit_s'], \
+        self.features['logit_aa_s'], \
+        self.features['alpha'], \
+        self.features['msa_prev'], \
+        self.features['pair_prev'], \
+        self.features['state_prev'] \
+        = diff_utils.take_step_nostate_grads(self.model,
+        self.features['msa_masked'],
+        self.features['msa_full'],
+        self.features['seq'],
+        self.features['t1d'],
+        self.features['t2d'],
+        self.features['idx_pdb'],
+        self.args['n_cycle'],
+        self.features['xyz_prev'],
+        self.features['alpha'],
+        self.features['xyz_t'],
+        self.features['alpha_t'],
+        self.features['seq_diffused'],
+        self.features['msa_prev'],
+        self.features['pair_prev'],
+        self.features['state_prev'])

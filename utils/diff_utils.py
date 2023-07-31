@@ -263,6 +263,57 @@ def take_step_nostate(model, msa, msa_extra, seq, t1d, t2d, idx_pdb, N_cycle, xy
     else:
         return seq_out, xyz_prev, pred_lddt_unbinned, logit_s, logit_aa_s, alpha, msa_prev, pair_prev, state_prev
 
+def take_step_nostate_grads(model, msa, msa_extra, seq, t1d, t2d, idx_pdb, N_cycle, xyz_prev, alpha, xyz_t,
+        alpha_t, seq_diffused, msa_prev, pair_prev, state_prev):
+    """ 
+    Single step in the diffusion process, with no conditioning on state
+    """
+    compute_allatom_coords=ComputeAllAtomCoords().to(seq.device)
+    msa_prev = None
+    pair_prev = None
+    state_prev = None
+    
+    B, _, N, L, _ = msa.shape
+    with torch.cuda.amp.autocast(True):
+        with torch.no_grad():
+            for i_cycle in range(N_cycle-1):
+                msa_prev, pair_prev, xyz_prev, state_prev, alpha = model(msa[:,0],
+                                                                   msa_extra[:,0],
+                                                                   seq[:,0], xyz_prev,
+                                                                   idx_pdb,
+                                                                   seq1hot=seq_diffused,
+                                                                   t1d=t1d, t2d=t2d,
+                                                                   xyz_t=xyz_t, alpha_t=alpha_t,
+                                                                   msa_prev=msa_prev,
+                                                                   pair_prev=pair_prev,
+                                                                   state_prev=state_prev,
+                                                                   return_raw=True)
+
+
+        logit_s, logit_aa_s, logits_exp, xyz_prev, pred_lddt, msa_prev, pair_prev, state_prev, alpha = model(msa[:,0],
+                                                            msa_extra[:,0],
+                                                            seq[:,0], xyz_prev,
+                                                            idx_pdb,
+                                                            seq1hot=seq_diffused,
+                                                            t1d=t1d, t2d=t2d, xyz_t=xyz_t, alpha_t=alpha_t,
+                                                            msa_prev=msa_prev,
+                                                            pair_prev=pair_prev,
+                                                            state_prev=state_prev,
+                                                            return_infer=True)
+
+        logit_aa_s_msa = torch.clone(logit_aa_s)
+        logit_aa_s = logit_aa_s.reshape(B,-1,N,L)[:,:,0,:]
+        logit_aa_s = logit_aa_s.reshape(B,-1,L)
+        seq_out = torch.argmax(logit_aa_s, dim=-2)
+
+        pred_lddt_unbinned = lddt_unbin(pred_lddt)
+        _, xyz_prev = compute_allatom_coords(seq_out, xyz_prev, alpha)
+
+    if N>1:
+        return seq_out, xyz_prev, pred_lddt_unbinned, logit_s, logit_aa_s, logit_aa_s_msa, alpha, msa_prev, pair_prev, state_prev
+    else:
+        return seq_out, xyz_prev, pred_lddt_unbinned, logit_s, logit_aa_s, alpha, msa_prev, pair_prev, state_prev
+
 
 def get_alphas(t1d, xyz_t, B, L, ti_dev, ti_flip, ang_ref):
     # get torsion angles from templates
