@@ -32,8 +32,10 @@ import diff_utils
 import pickle
 import pdb
 from utils.calc_dssp import annotate_sse
-from potentials import POTENTIALS
+from potentials import POTENTIALS, FEATURE_POTENTIALS
 from diffusion import GaussianDiffusion_SEQDIFF
+import torch.utils.checkpoint as checkpoint
+
 
 MODEL_PARAM ={
         "n_extra_block"   : 4,
@@ -113,6 +115,7 @@ class SEQDIFF_sampler:
         self.SE3_param_full = SE3_param_full
         self.SE3_param_topk = SE3_param_topk
         self.use_potentials = False
+        self.use_feature_potentials = False
         self.reset_design_num()
     
     def set_args(self, args):
@@ -477,7 +480,27 @@ class SEQDIFF_sampler:
             self.potential_list.append(POTENTIALS[p](self.args, self.features, s, self.DEVICE))
         
         self.use_potentials = True
+
+    def feature_potential_init(self):
+        '''
+            initialize potential functions being used and return list of potentails
+        '''
         
+        potentials = self.args['feature_potentials'].split(',')
+        potential_scale = [float(x) for x in self.args['feature_potential_scale'].split(',')]
+        assert len(potentials) == len(potential_scale), \
+            f'Please make sure number of feature potentials matches potential scales specified'
+        
+        self.feature_potential_list = []
+        for p,s in zip(potentials, potential_scale):
+            assert p in FEATURE_POTENTIALS.keys(), \
+                f'The feature potential specified: {p} , does not match into FEATURE_POTENTIALS dictionary in potentials.py'
+            print(f'Using feature potential: {p}')
+            self.feature_potential_list.append(FEATURE_POTENTIALS[p](self.args, self.features, s, self.DEVICE))
+        
+        self.use_feature_potentials = True
+
+
     def setup(self, init_model=True):
         '''
             run init model and init features to get everything prepped to go into model
@@ -729,7 +752,33 @@ class SEQDIFF_sampler:
             grads += p.get_gradients(self.features['seq_out'])
         
         self.features['seq_out'] += (grads/len(self.potential_list))
+
+    def compute_feature_potentials(self):
+        '''
+            apply potentials
+        '''
         
+        grads = {}
+        for p in self.feature_potential_list:
+            for key,val in p.get_gradients(self.features).items():
+                if key not in grads:
+                    grads[key] = [val]
+                else:
+                    grads[key].append(val)
+        summed_grads={}
+        for key,vals in grads.items(): 
+            grad = torch.zeros_like(vals[0])
+            for subgrad in grads[key]:
+                grad += subgrad
+            summed_grads[key]=grad
+        self.features['feature_gradients'] = summed_grads
+    
+    def apply_feature_potentials(self):
+        for key,grad in self.features['feature_gradients'].items():
+            self.features[key] = torch.clone(self.features[key] + grad).detach()
+        del self.features['feature_gradients']
+
+
     def generate_sample(self):
         '''
             sample from the model 
@@ -784,8 +833,8 @@ class SEQDIFF_sampler:
                 self.features['seq_out'] = torch.softmax(self.features['seq_out'],dim=-1)*2-1
             if self.args['clamp_seqout']:
                 self.features['seq_out'] = torch.clamp(self.features['seq_out'], 
-                                                       min=-((1/self.diffuser.alphas_cumprod[t])*0.25+5), 
-                                                       max=((1/self.diffuser.alphas_cumprod[t])*0.25+5))
+                                                       min=-((1/self.diffuser.alphas_cumprod[self.t])*0.25+5), 
+                                                       max=((1/self.diffuser.alphas_cumprod[self.t])*0.25+5))
             
             # apply potentials
             if self.use_potentials:
@@ -861,8 +910,8 @@ class SEQDIFF_sampler:
             save trb file
         '''
         
-        lddt = self.features['pred_lddt'].squeeze().cpu().numpy()
-        strmasktemp = self.features['mask_str'].squeeze().cpu().numpy()
+        lddt = torch.clone(self.features['pred_lddt'].squeeze().cpu()).detach().numpy()
+        strmasktemp = torch.clone(self.features['mask_str'].squeeze().cpu()).detach().numpy()
 
         partial_lddt = [lddt[i] for i in range(np.shape(strmasktemp)[0]) if strmasktemp[i] == 0]
         trb = {}
@@ -1224,8 +1273,8 @@ class cleavage_foldswitch_SAMPLER(SEQDIFF_sampler):
                 self.features['seq_out'] = torch.softmax(self.features['seq_out'],dim=-1)*2-1
             if self.args['clamp_seqout']:
                 self.features['seq_out'] = torch.clamp(self.features['seq_out'],
-                                                       min=-((1/self.diffuser.alphas_cumprod[t])*0.25+5),
-                                                       max=((1/self.diffuser.alphas_cumprod[t])*0.25+5))
+                                                       min=-((1/self.diffuser.alphas_cumprod[self.t])*0.25+5),
+                                                       max=((1/self.diffuser.alphas_cumprod[self.t])*0.25+5))
 
             # apply potentials
             if self.use_potentials:
@@ -1677,6 +1726,11 @@ class multistate_SAMPLER(SEQDIFF_sampler):
         else:
             self.potential_list = []
             self.use_potentials = False
+        if self.args['feature_potentials'] not in ['', None]:
+            self.feature_potential_init()
+        else:
+            self.feature_potential_list = []
+            self.use_feature_potentials = False
 
         # make hostspot features
         self.make_hotspot_features()
@@ -1782,10 +1836,37 @@ class multistate_SAMPLER(SEQDIFF_sampler):
         self.features['state_prev'] = None
         self.features['b_state_prev'] = None
 
+
     def predict_x(self):
         '''
             take step using X_t-1 features to predict Xo
         '''
+        # for prefix in ['','b_']:
+        #     self.features[f'{prefix}seq'], \
+        #     self.features[f'{prefix}xyz'], \
+        #     self.features[f'{prefix}pred_lddt'], \
+        #     self.features[f'{prefix}logit_s'], \
+        #     self.features[f'{prefix}logit_aa_s'], \
+        #     self.features[f'{prefix}alpha'], \
+        #     self.features[f'{prefix}msa_prev'], \
+        #     self.features[f'{prefix}pair_prev'], \
+        #     self.features[f'{prefix}state_prev'] \
+        #     = checkpoint.checkpoint(diff_utils.take_step_nostate_grad,self.model,
+        #     self.features[f'{prefix}msa_masked'].requires_grad_(requires_grad=True),
+        #     self.features[f'{prefix}msa_full'].requires_grad_(requires_grad=True),
+        #     self.features[f'{prefix}seq'],
+        #     self.features[f'{prefix}t1d'].requires_grad_(requires_grad=True),
+        #     self.features[f'{prefix}t2d'].requires_grad_(requires_grad=True),
+        #     self.features[f'{prefix}idx_pdb'],
+        #     self.args['n_cycle'],
+        #     self.features[f'{prefix}xyz_prev'].requires_grad_(requires_grad=True),
+        #     self.features[f'{prefix}alpha'].requires_grad_(requires_grad=True),
+        #     self.features[f'{prefix}xyz_t'].requires_grad_(requires_grad=True),
+        #     self.features[f'{prefix}alpha_t'].requires_grad_(requires_grad=True),
+        #     self.features[f'{prefix}seq_diffused'].requires_grad_(requires_grad=True),
+        #     self.features[f'{prefix}msa_prev'],
+        #     self.features[f'{prefix}pair_prev'],
+        #     self.features[f'{prefix}state_prev'], use_reentrant=False, preserve_rng_state=False)
         for prefix in ['','b_']:
             self.features[f'{prefix}seq'], \
             self.features[f'{prefix}xyz'], \
@@ -1796,22 +1877,23 @@ class multistate_SAMPLER(SEQDIFF_sampler):
             self.features[f'{prefix}msa_prev'], \
             self.features[f'{prefix}pair_prev'], \
             self.features[f'{prefix}state_prev'] \
-            = diff_utils.take_step_nostate(self.model,
+            = diff_utils.take_step_nostate_grad(self.model,
             self.features[f'{prefix}msa_masked'],
             self.features[f'{prefix}msa_full'],
             self.features[f'{prefix}seq'],
-            self.features[f'{prefix}t1d'],
-            self.features[f'{prefix}t2d'],
+            self.features[f'{prefix}t1d'].detach().requires_grad_(requires_grad=False),
+            self.features[f'{prefix}t2d'].detach().requires_grad_(requires_grad=False),
             self.features[f'{prefix}idx_pdb'],
             self.args['n_cycle'],
-            self.features[f'{prefix}xyz_prev'],
-            self.features[f'{prefix}alpha'],
-            self.features[f'{prefix}xyz_t'],
-            self.features[f'{prefix}alpha_t'],
+            self.features[f'{prefix}xyz_prev'].detach().requires_grad_(requires_grad=False),
+            self.features[f'{prefix}alpha'].detach().requires_grad_(requires_grad=False),
+            self.features[f'{prefix}xyz_t'].detach().requires_grad_(requires_grad=False),
+            self.features[f'{prefix}alpha_t'].detach().requires_grad_(requires_grad=False),
             self.features[f'{prefix}seq_diffused'],
             self.features[f'{prefix}msa_prev'],
             self.features[f'{prefix}pair_prev'],
             self.features[f'{prefix}state_prev'])
+        
             
     def self_condition_seq(self):
         '''
@@ -1820,38 +1902,103 @@ class multistate_SAMPLER(SEQDIFF_sampler):
         for prefix in ['','b_']:
             self.features[f'{prefix}t1d'][:,:,:,:21] = self.features[f'{prefix}seq_out'][:,:21]
 
+    def self_condition_str_scheduled(self):
+        '''
+            unmask random fraction of residues according to timestep
+        '''
+        print('self_conditioning on structure')
+        for pre in ['','b_']:
+            xyz_prev_template = torch.clone(self.features[f'{pre}xyz'])[None]
+            self_conditioning_mask = torch.rand(self.features[f'{pre}L']) < self.diffuser.alphas_cumprod[self.t]
+            xyz_prev_template[:,:,~self_conditioning_mask] = float('nan')
+            xyz_prev_template[:,:,self.features[f'{pre}mask_str'][0][0]] = float('nan')
+            xyz_prev_template[:,:,:,3:] = float('nan')
+            t2d_sc = xyz_to_t2d(xyz_prev_template)
+
+            xyz_t_sc = torch.zeros_like(self.features[f'{pre}xyz_t'][:,:1])
+            xyz_t_sc[:,:,:,:3] = xyz_prev_template[:,:,:,:3]
+            xyz_t_sc[:,:,:,3:] = float('nan')
+
+            t1d_sc = torch.clone(self.features[f'{pre}t1d'][:,:1])
+            t1d_sc[:,:,~self_conditioning_mask] = 0
+            t1d_sc[:,:,self.features[f'{pre}mask_str'][0][0]] = 0
+
+            self.features[f'{pre}t1d'] = torch.cat([self.features[f'{pre}t1d'][:,:1],t1d_sc], dim=1)
+            self.features[f'{pre}t2d'] = torch.cat([self.features[f'{pre}t2d'][:,:1],t2d_sc], dim=1)
+            self.features[f'{pre}xyz_t'] = torch.cat([self.features[f'{pre}xyz_t'][:,:1],xyz_t_sc], dim=1)
+
+            self.features[f'{pre}alpha'], self.features[f'{pre}alpha_t'] = diff_utils.get_alphas(self.features[f'{pre}t1d'], self.features[f'{pre}xyz_t'], 
+                                                                                     self.features[f'{pre}B'], self.features[f'{pre}L'], 
+                                                                                     self.ti_dev, self.ti_flip, self.ang_ref)
+            self.features[f'{pre}xyz_t'] = get_init_xyz(self.features[f'{pre}xyz_t'])
+
+    
+    def self_condition_str(self):
+        '''
+            conditioining on strucutre in NAR way
+        '''
+        print("conditioning on structure for NAR structure noising")
+        for pre in ['','b_']:
+            xyz_t_str_sc           = torch.zeros_like(self.features[f'{pre}xyz_t'][:,:1])
+            xyz_t_str_sc[:,:,:,:3] = torch.clone(self.features[f'{pre}xyz'])[:,:,:3]
+            xyz_t_str_sc[:,:,:,3:] = float('nan')
+            t2d_str_sc             = xyz_to_t2d(self.features[f'{pre}xyz_t'])
+            t1d_str_sc             = torch.clone(self.features[f'{pre}t1d'])
+
+            self.features[f'{pre}xyz_t'] = torch.cat([self.features[f'{pre}xyz_t'],xyz_t_str_sc], dim=1)
+            self.features[f'{pre}t2d']   = torch.cat([self.features[f'{pre}t2d'],t2d_str_sc], dim=1)
+            self.features[f'{pre}t1d']   = torch.cat([self.features[f'{pre}t1d'],t1d_str_sc], dim=1)
+
+            self.features[f'{pre}alpha'], self.features[f'{pre}alpha_t'] = diff_utils.get_alphas(self.features[f'{pre}t1d'], self.features[f'{pre}xyz_t'], 
+                                                                                     self.features[f'{pre}B'], self.features[f'{pre}L'], 
+                                                                                     self.ti_dev, self.ti_flip, self.ang_ref)
+
+
     def noise_x(self):
         '''
             get X_t-1 from predicted Xo
         '''
         # sample x_t-1
-        self.features['post_mean'] = self.diffuser.q_sample(self.features['seq_out'], self.t, DEVICE=self.DEVICE)
+        for prefix in ['','b_']:
+            self.features[f'{prefix}post_mean'] = self.diffuser.q_sample(self.features[f'{prefix}seq_out'], self.t, DEVICE=self.DEVICE)
 
-        if self.features['sym'] > 1:
-            self.features['post_mean'] = self.symmetrize_seq(self.features['post_mean'])
+            if self.features['sym'] > 1:
+                self.features[f'{prefix}post_mean'] = self.symmetrize_seq(self.features[f'{prefix}post_mean'])
 
-        # update seq and masks
-        self.features['seq_diffused'][0,~self.features['mask_seq'][0],:21] = self.features['post_mean'][~self.features['mask_seq'][0],...]
-        self.features['seq_diffused'][0,:,21] = 0.0
+            # update seq and masks
+            self.features[f'{prefix}seq_diffused']=self.features[f'{prefix}seq_diffused'].detach()
+            self.features[f'{prefix}seq_diffused'][0,~self.features[f'{prefix}mask_seq'][0],:21] = self.features[f'{prefix}post_mean'][~self.features[f'{prefix}mask_seq'][0],...]
+            self.features[f'{prefix}seq_diffused'][0,:,21] = 0.0
 
-        # did not know we were clamping seq
-        self.features['seq_diffused'] = torch.clamp(self.features['seq_diffused'], min=-3, max=3)
+            # did not know we were clamping seq
+            self.features[f'{prefix}seq_diffused'] = torch.clamp(self.features[f'{prefix}seq_diffused'], min=-3, max=3)
 
-        # match other features to seq diffused
-        self.features['seq'] = torch.argmax(self.features['seq_diffused'], dim=-1)[None]
-        self.features['msa_masked'][:,:,:,:,:22] = self.features['seq_diffused']
-        self.features['msa_masked'][:,:,:,:,22:44] = self.features['seq_diffused']
-        self.features['msa_full'][:,:,:,:,:22] = self.features['seq_diffused']
-        self.features['t1d'][:1,:,:,22] = 1-int(self.t)/self.args['T']
+            # match other features to seq diffused
+            self.features[f'{prefix}seq'] = torch.argmax(self.features[f'{prefix}seq_diffused'], dim=-1)[None]
+            self.features[f'{prefix}msa_masked']=torch.clone(self.features[f'{prefix}msa_masked']).detach()
+            self.features[f'{prefix}msa_masked'][:,:,:,:,:22] = self.features[f'{prefix}seq_diffused']
+            self.features[f'{prefix}msa_masked'][:,:,:,:,22:44] = self.features[f'{prefix}seq_diffused']
+            self.features[f'{prefix}msa_full'][:,:,:,:,:22] = self.features[f'{prefix}seq_diffused']
+            self.features[f'{prefix}t1d'][:1,:,:,22] = 1-int(self.t)/self.args['T']
         
         # get clones for children
-        self.features['b_seq'] = torch.clone(self.features['seq'][...,:self.binder_len])
-        self.features['b_msa'] = torch.clone(self.features['msa'][...,:self.binder_len])
-        self.features['b_msa_masked'] = torch.clone(self.features['msa_masked'][:,:,:,:self.binder_len])
-        self.features['b_msa_full'] = torch.clone(self.features['msa_full'][:,:,:,:self.binder_len])
-        self.features['b_seq_diffused'] = torch.clone(self.features['seq_diffused'][:,:self.binder_len])
-        self.features['b_t1d'][:,:,:,:21] = torch.clone(self.features['t1d'][:,:,:self.binder_len,:21])
-        self.features['b_t1d'][:,:,:,22] = 1-int(self.t)/self.args['T']
+        #self.features['b_seq'] = torch.clone(self.features['seq'][...,:self.binder_len])
+        #self.features['b_msa'] = torch.clone(self.features['msa'][...,:self.binder_len])
+        #self.features['b_msa_masked'] = torch.clone(self.features['msa_masked'][:,:,:,:self.binder_len])
+        #self.features['b_msa_full'] = torch.clone(self.features['msa_full'][:,:,:,:self.binder_len])
+        #self.features['b_seq_diffused'] = torch.clone(self.features['seq_diffused'][:,:self.binder_len])
+        #self.features['b_t1d'][:,:,:,:21] = torch.clone(self.features['t1d'][:,:,:self.binder_len,:21])
+        #self.features['b_t1d'][:,:,:,22] = 1-int(self.t)/self.args['T']
+    
+    def reset_graph(self):
+        for key,val in self.features.items():
+            if torch.is_tensor(val):
+                # if val.is_leaf:
+                self.features[key] = val.detach().requires_grad_(requires_grad=False)
+                torch.cuda.empty_cache()
+                #Can't use requires_grad=False because this appears on subsequent passes:
+                #RuntimeError: you can only change requires_grad flags of leaf variables. If you want to use a computed variable in a subgraph that doesn't require differentiation use var_no_grad = var.detach().
+                # val.requires_grad_(requires_grad=False)
 
     def generate_sample(self):
         '''
@@ -1874,11 +2021,21 @@ class multistate_SAMPLER(SEQDIFF_sampler):
 
         # main sampling loop
         for j in range(self.max_t):
+            
+            self.reset_graph()
             self.t = torch.tensor(self.max_t-j-1).to(self.DEVICE)
-
-            # run features through the model to get X_o prediction
+            
+            # self.features['msa_masked'].requires_grad_(requires_grad=True)
+            # self.features['b_msa_masked'].requires_grad_(requires_grad=True)
+            self.features['seq_diffused'].requires_grad_(requires_grad=True)
+            self.features['b_seq_diffused'].requires_grad_(requires_grad=True)
             self.predict_x()
 
+            if self.use_feature_potentials:
+                self.compute_feature_potentials()
+                
+            #del self.features['seq_diffused_tmp']
+            #del self.features['b_seq_diffused_tmp']
             # save step
             if self.args['save_all_steps']:
                 self.save_step()
@@ -1886,11 +2043,13 @@ class multistate_SAMPLER(SEQDIFF_sampler):
             # get seq out
             self.features['seq_out'] = torch.permute(self.features['logit_aa_s'][0], (1,0))
             self.features['b_seq_out'] = torch.permute(self.features['b_logit_aa_s'][0], (1,0))
+            if self.use_feature_potentials:
+                self.apply_feature_potentials()
             
             # mix seq out for update
             #a_seq_out = self.features['seq_out'][self.binder_len:]
             self.features['seq_out'] = torch.cat([(self.features['seq_out'][:self.binder_len] * (1-self.args['mixing'])) + (self.features['b_seq_out'] * self.args['mixing']),self.features['seq_out'][self.binder_len:]],dim=0)
-
+            self.features['b_seq_out'] = self.features['seq_out'][:self.binder_len]
             self.features['plddt'] = torch.clone(self.features['pred_lddt'][~self.features['mask_seq']]).mean().item()
             self.features['b_plddt'] = torch.clone(self.features['b_pred_lddt'][~self.features['b_mask_seq']]).mean().item()
             self.features['mix_plddt'] = self.features['plddt']*(1-self.args['mixing']) + self.features['b_plddt']*self.args['mixing']
@@ -1918,21 +2077,31 @@ class multistate_SAMPLER(SEQDIFF_sampler):
             if self.args['struc_cond_sc']:
                 self.self_condition_str()
 
+                
+                
+                
             # sequence alterations
             if self.args['softmax_seqout']:
                 self.features['seq_out'] = torch.softmax(self.features['seq_out'],dim=-1)*2-1
             if self.args['clamp_seqout']:
                 self.features['seq_out'] = torch.clamp(self.features['seq_out'],
-                                                       min=-((1/self.diffuser.alphas_cumprod[t])*0.25+5),
-                                                       max=((1/self.diffuser.alphas_cumprod[t])*0.25+5))
+                                                       min=-((1/self.diffuser.alphas_cumprod[self.t])*0.25+5),
+                                                       max=((1/self.diffuser.alphas_cumprod[self.t])*0.25+5))
+                self.features['b_seq_out'] = torch.clamp(self.features['b_seq_out'],
+                                                       min=-((1/self.diffuser.alphas_cumprod[self.t])*0.25+5),
+                                                       max=((1/self.diffuser.alphas_cumprod[self.t])*0.25+5))
+    
+
 
             # apply potentials
             if self.use_potentials:
                 self.apply_potentials()
+            
 
             # noise to X_t-1
             if self.t != 0:
                 self.noise_x()
+            
             
             print(f'MIX PLDDT: {self.features["mix_plddt"]:.03f}     BEST MIX PLDDT: {self.features["best_plddt"]:.03f}')
             
@@ -1945,7 +2114,7 @@ class multistate_SAMPLER(SEQDIFF_sampler):
             print ("    TIMESTEP [%02d/%02d]   |   current PLDDT: %.4f   <<  >>   best PLDDT: %.4f"%(
                     self.t+1, self.args['T'], self.features['b_pred_lddt'][~self.features['b_mask_seq']].mean().item(),
                     self.features['b_best_pred_lddt'][~self.features['b_mask_seq']].mean().item()))
-            
+            self.model.zero_grad()
             
         # record time
         self.delta_time = time.time() - self.start_time

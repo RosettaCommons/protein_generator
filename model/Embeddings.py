@@ -62,7 +62,6 @@ class MSA_emb(nn.Module):
         # Outputs:
         #   - msa: Initial MSA embedding (B, N, L, d_msa)
         #   - pair: Initial Pair embedding (B, L, L, d_pair)
-
         N = msa.shape[1] # number of sequenes in MSA
         
         # msa embedding

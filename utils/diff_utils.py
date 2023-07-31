@@ -8,7 +8,7 @@ from util_module import ComputeAllAtomCoords
 from util import *
 from inpainting_util import MSAFeaturize_fixbb, TemplFeaturizeFixbb, lddt_unbin
 from kinematics import xyz_to_t2d
-
+import torch.utils.checkpoint as checkpoint
 
 def mask_inputs(seq, msa_masked, msa_full, xyz_t, t1d, input_seq_mask=None, 
         input_str_mask=None, input_t1dconf_mask=None, diffuser=None, t=None, 
@@ -274,3 +274,58 @@ def get_alphas(t1d, xyz_t, B, L, ti_dev, ti_flip, ang_ref):
     alpha_mask = alpha_mask.reshape(B,-1,L,10,1)
     alpha_t = torch.cat((alpha, alpha_mask), dim=-1).reshape(B, -1, L, 30)
     return alpha, alpha_t
+
+
+def take_step_nostate_grad(model, msa, msa_extra, seq, t1d, t2d, idx_pdb, N_cycle, xyz_prev, alpha, xyz_t,
+        alpha_t, seq_diffused, msa_prev, pair_prev, state_prev):
+    """ 
+    Single step in the diffusion process, with no conditioning on state
+    """
+    compute_allatom_coords=ComputeAllAtomCoords().to(seq.device)
+    msa_prev = None
+    pair_prev = None
+    state_prev = None
+    
+    B, _, N, L, _ = msa.shape
+    with torch.cuda.amp.autocast(True):
+        # with torch.no_grad():
+        for i_cycle in range(N_cycle-1):
+            msa_prev, pair_prev, xyz_prev, state_prev, alpha = model(msa[:,0],
+                                                               msa_extra[:,0],
+                                                               seq[:,0], xyz_prev,
+                                                               idx_pdb,
+                                                               seq1hot=seq_diffused,
+                                                               t1d=t1d, t2d=t2d,
+                                                               xyz_t=xyz_t, alpha_t=alpha_t,
+                                                               msa_prev=msa_prev,
+                                                               pair_prev=pair_prev,
+                                                               state_prev=state_prev,
+                                                               return_raw=True, use_checkpoint=True)
+
+
+
+        #with torch.enable_grad():
+        logit_s, logit_aa_s, logits_exp, xyz_prev, pred_lddt, msa_prev, pair_prev, state_prev, alpha = model(msa[:,0],
+                                                    msa_extra[:,0],
+                                                    seq[:,0], xyz_prev,
+                                                    idx_pdb,
+                                                    seq1hot=seq_diffused,
+                                                    t1d=t1d, t2d=t2d, xyz_t=xyz_t, alpha_t=alpha_t,
+                                                    msa_prev=msa_prev,
+                                                    pair_prev=pair_prev,
+                                                    state_prev=state_prev,
+                                                    return_infer=True, use_checkpoint=True)
+
+        logit_aa_s_msa = torch.clone(logit_aa_s)
+        logit_aa_s = logit_aa_s.reshape(B,-1,N,L)[:,:,0,:]
+        logit_aa_s = logit_aa_s.reshape(B,-1,L)
+        seq_out = torch.argmax(logit_aa_s, dim=-2)#.type(torch.float32).requires_grad_(requires_grad=True)
+        #seq_out.retain_grad()
+
+        pred_lddt_unbinned = lddt_unbin(pred_lddt)
+        _, xyz_prev = compute_allatom_coords(seq_out, xyz_prev, alpha)
+######end autocast
+    if N>1:
+        return seq_out, xyz_prev, pred_lddt_unbinned, logit_s, logit_aa_s, logit_aa_s_msa, alpha, msa_prev, pair_prev, state_prev
+    else:
+        return seq_out, xyz_prev, pred_lddt_unbinned, logit_s, logit_aa_s, alpha, msa_prev, pair_prev, state_prev

@@ -63,9 +63,11 @@ class RoseTTAFoldModule(nn.Module):
 
         idx = idx.long()
         msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, seq1hot=seq1hot)
-        
+
+        print(f'pair.grad_fn: {pair.grad_fn}')
+        print(f'pair.requires_grad: {pair.requires_grad}')
         msa_full = self.full_emb(msa_full, seq, idx, seq1hot=seq1hot)
-        #
+        # with torch.no_grad():
         # Do recycling
         if msa_prev == None:
             msa_prev = torch.zeros_like(msa_latent[:,0])
@@ -79,7 +81,7 @@ class RoseTTAFoldModule(nn.Module):
         #ic(pair_prev.shape)
         #ic(xyz.shape)
         #ic(state_prev.shape)
-        
+
 
         msa_recycle, pair_recycle, state_recycle = self.recycle(seq, msa_prev, pair_prev, xyz, state_prev)
         msa_latent[:,0] = msa_latent[:,0] + msa_recycle.reshape(B,L,-1)
@@ -123,7 +125,8 @@ class RoseTTAFoldModule(nn.Module):
         logits = self.c6d_pred(pair)
         
         # Predict LDDT
-        lddt = self.lddt_pred(state)
+        with torch.no_grad():
+            lddt = self.lddt_pred(state)
 
         # predict experimentally resolved or not
         logits_exp = self.exp_pred(msa[:,0], state)

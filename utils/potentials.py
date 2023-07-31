@@ -687,5 +687,189 @@ class PSSMbias(Potential):
         return self.PSSM*self.potential_scale
 
 
+######################### Feature Potentials ##############################
+
+#From hallucination
+def get_entropy_loss(logit_s, mask=None, beta=1, dist_bins=37, eps=1e-16, type_='orig',k=5):
+    '''
+    net_out - dict with keys: 'c6d' (all pairwise 6D transforms) and/or 'c3d' (3D cartesian coordinates).
+                This function uses 'c6d' only. It is a dictionary with the following keys:
+                keys: ['p_dist', 'p_omega', 'p_theta', 'p_phi']
+                vals: (torch.float32) [batch_size, sequence_length, sequence_length, num_categories]
+    mask - 1.0 to include ij pair in cce calculation. The diagonal is automatically excluded.
+            (torch.float32)[sequence_length, sequence_length]
+    '''
+
+    def entropy_orig(p, mask):
+        S_ij = -(p * torch.log(p + eps)).sum(axis=-1)
+        S_ave = torch.sum(mask * S_ij, axis=(1,2)) / (torch.sum(mask, axis=(1,2)) + eps)
+        return S_ave
+
+    def entropy_leaky(p,p_, mask):
+        S_ij = -(p * torch.log(p_ + eps)[...,:-1]).sum(axis=-1)
+        S_ave = torch.sum(mask * S_ij, axis=(1,2)) / (torch.sum(mask, axis=(1,2)) + eps)
+        return S_ave
+
+    def entropy_leaky_min(p,p_, mask):
+        S_ij = -(p * torch.log(p_ + eps)[...,:-1]).sum(axis=-1)
+        #pick top k
+        S_ij = mask * S_ij
+        S_ij[S_ij==0] = 100
+        S_ij_min=torch.topk(S_ij, k,largest=False)[0]
+        S_ij_min[S_ij_min==100] = 0
+        S_ave=torch.sum(S_ij_min,axis=(1,2))/ (torch.sum(mask, axis=(1,2)) + eps)*10 #*k
+        return S_ave
+
+    def entropy(p,p_, mask):
+        if type_=='orig':
+            return entropy_orig(p, mask)
+        elif type_=='leaky':
+            return entropy_leaky(p,p_, mask)
+        elif type_=='leaky_min':
+            return entropy_leaky_min(p,p_, mask)
+
+
+    # This loss function uses c6d
+    dict_pred = {'p_dist':torch.softmax(torch.permute(logit_s[0], (0,2,3,1)),dim=-1).float(), 'p_omega':torch.softmax(torch.permute(logit_s[1], (0,2,3,1)),dim=-1).float(), 'p_theta':torch.softmax(torch.permute(logit_s[2], (0,2,3,1)),dim=-1).float(), 'p_phi':torch.softmax(torch.permute(logit_s[3], (0,2,3,1)),dim=-1).float()} #c6d
+
+    # Housekeeping
+    device = dict_pred['p_dist'].device
+    B = dict_pred['p_dist'].shape[0]
+
+    # Mask includes all ij pairs except the diagonal by default
+    if mask is None:
+        L_ptn = dict_pred['p_dist'].shape[1]
+        mask = torch.ones(L_ptn)
+
+    # Exclude diag
+    L_mask = mask.shape[0]
+    mask *= (1 - torch.eye(L_mask, dtype=torch.float32, device=mask.device))
+
+    # Add batch
+    mask = mask[None]
+    mask = mask.to(device)
+
+    # Modulate sharpness of probability distribution
+    # Also exclude >20A bin, which improves output quality
+    pd = torch.softmax(torch.log(beta * dict_pred['p_dist'][...,:-1] + eps), axis = -1)
+    pd_= torch.softmax(torch.log(beta * dict_pred['p_dist'] + eps), axis = -1)
+    po = torch.softmax(torch.log(beta * dict_pred['p_omega'][...,:36] + eps), axis = -1)
+    po_= torch.softmax(torch.log(beta * dict_pred['p_omega'] + eps), axis = -1)
+    pt = torch.softmax(torch.log(beta * dict_pred['p_theta'][...,:36] + eps), axis = -1)
+    pt_= torch.softmax(torch.log(beta * dict_pred['p_theta'] + eps), axis = -1)
+    pp = torch.softmax(torch.log(beta * dict_pred['p_phi'][...,:18] + eps), axis = -1)
+    pp_= torch.softmax(torch.log(beta * dict_pred['p_phi'] + eps), axis = -1)
+
+    # Entropy loss
+    S_d = entropy(pd.to(device),pd_.to(device), mask)
+    S_o = entropy(po.to(device),po_.to(device), mask)
+    S_t = entropy(pt.to(device),pt_.to(device), mask)
+    S_p = entropy(pp.to(device),pp_.to(device), mask)
+    loss = 0.25 * (S_d + S_o + S_t + S_p)
+    return loss
+
+
+class feature_Potential:
+    
+    def get_gradients(features):
+        '''
+            EVERY POTENTIAL CLASS MUST RETURN GRADIENTS
+        '''
+        
+        sys.exit('ERROR POTENTIAL HAS NOT BEEN IMPLEMENTED')
+
+class Termini_Contacts(feature_Potential):
+    
+    def __init__(self, args, features, scale, DEVICE):
+        self.DEVICE=DEVICE
+        self.scale = scale
+        self.binder_len = args['binder_len']
+
+    def get_gradients(self, features):
+        grads={}
+        torch.set_grad_enabled(True)
+        L=self.binder_len
+        mask=torch.zeros(L,L)
+        for i in range(L):
+            for j in range(L):
+                if i<20 and j>L-20:
+                    mask[i,j]=1.
+                if j<20 and i>L-20:
+                    mask[i,j]=1.
+        for prefix in ['','b_']:
+            logit_s = [x[:,:,:L,:L] for x in features[f'{prefix}logit_s']]
+            # loss = get_entropy_loss(logit_s, mask=mask, beta=1, dist_bins=37, eps=1e-16, type_='leaky',k=5)
+            distmap=(torch.stack([torch.ones_like(logit_s[0][0,0]) * i**2 for i in range(0,logit_s[0][0].shape[0])])*torch.softmax(logit_s[0][0], dim=0)).sum(dim=0)
+            loss=torch.mean(distmap*mask.to(distmap.device))
+            print(loss)
+            torch.cuda.empty_cache()
+            loss.backward()
+            grad=features[f'{prefix}seq_diffused'].grad[0,:,:21]
+            grad=grad-grad.min(dim=-1)[0].unsqueeze(-1).expand(-1,21)
+            grad=grad/grad.max(dim=-1)[0].unsqueeze(-1).expand(-1,21)
+            grad=grad-0.5
+            grads[f'{prefix}seq_out'] = grad
+            del grad
+            # grads[f'{prefix}seq_out'] = torch.autograd.grad(outputs=loss, inputs=features[f'{prefix}seq_diffused'])[0,:,:21]
+            del loss
+            torch.cuda.empty_cache()
+        return {k:v*self.scale for k,v in grads.items()}
+    #def get_gradientsV(self, features):
+
+    #    xyz=features['xyz']
+    #    b_xyz=features['b_xyz']
+    #    
+    #    n=torch.mean(xyz[...,0:25,:,:],dim=(-2,-3))
+    #    c=torch.mean(xyz[...,:self.binder_len,:,:][...,-25:,:,:],dim=(-2,-3))
+    #    b_n=torch.mean(b_xyz[...,0:25,:,:],dim=(-2,-3))
+    #    b_c=torch.mean(b_xyz[...,-25:,:,:],dim=(-2,-3))
+    #    
+    #    
+    #    
+    #    dist=torch.sqrt(torch.square(n[...,0]-c[...,0])+torch.square(n[...,1]-c[...,1])+torch.square(n[...,2]-c[...,2]))
+    #    b_dist=torch.sqrt(torch.square(b_n[...,0]-b_c[...,0])+torch.square(b_n[...,1]-b_c[...,1])+torch.square(b_n[...,2]-b_c[...,2]))
+    #    
+    #    loss = torch.absolute(dist-b_dist)
+    #    
+    #    loss.backward()
+    #    print(loss)
+    #    out = {'seq_out':-features['msa_masked'].grad[0,0,0,:,:21]*self.scale, 'b_seq_out':-features['b_msa_masked'].grad[0,0,0,:,:21]*self.scale}
+    #    del loss
+    #    return out
+#    def get_gradients(self, features):
+
+        #xyz=features['xyz']
+        #xyz.retain_grad()
+        #
+        #n=torch.mean(xyz[...,0:25,:,:],dim=(-2,-3))
+        #c=torch.mean(xyz[...,:self.binder_len,:,:][...,-25:,:,:],dim=(-2,-3))
+        #
+        #dist=torch.sqrt(torch.square(n[...,0]-c[...,0])+torch.square(n[...,1]-c[...,1])+torch.square(n[...,2]-c[...,2]))
+        #
+        #dist.backward()
+      
+        #grad = features['msa_masked'].grad[0,0,0,:,:21]
+        #xyzgrad = xyz.grad
+        #print(dist)
+        #del dist
+        #b_xyz=features['b_xyz']
+        #b_xyz.retain_grad()
+        #
+        #b_n=torch.mean(b_xyz[...,0:25,:,:],dim=(-2,-3))
+        #b_c=torch.mean(b_xyz[...,:self.binder_len,:,:][...,-25:,:,:],dim=(-2,-3))
+        #
+        #b_dist=torch.sqrt(torch.square(b_n[...,0]-b_c[...,0])+torch.square(b_n[...,1]-b_c[...,1])+torch.square(b_n[...,2]-b_c[...,2]))
+        #
+        #b_dist.backward()
+
+        #b_grad = features['b_msa_masked'].grad[0,0,0,:,:21]
+        #b_xyzgrad = b_xyz.grad
+        #print(b_dist) 
+        #del b_dist
+        #return {'seq_out':torch.pow(torch.absolute(grad), 1/4)*torch.sign(grad)*-self.scale}#, 'b_seq_out':torch.pow(torch.absolute(b_grad), 1/4)*torch.sign(b_grad)*-self.scale, 'xyz':xyzgrad*self.scale, 'b_xyz':-b_xyzgrad*self.scale}
+            
+
+
 ### ADD NEW POTENTIALS INTO LIST DOWN BELOW ###
 POTENTIALS = {'aa_bias':AACompositionalBias, 'charge':ChargeBias, 'hydrophobic':HydrophobicBias, 'PSSM':PSSMbias}
+FEATURE_POTENTIALS = {'term_contacts':Termini_Contacts}
