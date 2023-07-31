@@ -279,8 +279,8 @@ class SEQDIFF_sampler:
         if self.features['sym'] > 1:
             print(f"Input sequence symmetry {self.features['sym']}")
        
-        assert (self.args['contigs'] in [('0'),(0),['0'],[0]] ) ^ (self.args['sequence'] in ['',None]),\
-                f'You are specifying contigs ({self.args["contigs"]}) and sequence ({self.args["sequence"]})  (or neither), please specify one or the other'
+        if (self.args['contigs'] in [('0'),(0),['0'],[0]] ) ^ (self.args['sequence'] in ['',None]):
+            print(f'You are specifying contigs ({self.args["contigs"]}) and sequence ({self.args["sequence"]}), if the lengths dont match an error will be thrown')
         
         # initialize trb dictionary
         self.features['trb_d'] = {}
@@ -358,6 +358,21 @@ class SEQDIFF_sampler:
                 self.features['seq'] = torch.full((1,len(self.features['rm'].ref)),20).squeeze()
                 self.features['seq'][self.features['rm'].hal_idx0] = seq_input[self.features['rm'].ref_idx0]
                 
+                if self.args['sequence'] not in ['',None]:
+                    print('Merging input sequence with contigs...')
+                    
+                    allowable_aas = [x for x in self.conversion[:-1]]
+                    for x in self.args['sequence']: assert x in allowable_aas, f'Amino Acid {x} is undefinded, please only use standart 20 AAs'
+                    
+                    loaded_seq = [self.conversion.index(x) for x in self.args['sequence']]
+                    
+                    assert len(loaded_seq) == self.features['seq'].shape[0], f'Your input contigs (len {self.features["seq"].shape[0]}) and sequence (len {len(loaded_seq)}) do not match'
+                    
+                    for i,x in enumerate(loaded_seq):
+                        if x != self.conversion.index('X'):
+                            self.features['seq'][i] = x
+                            self.features['mask_seq'][0][i] = True
+
                 # template confidence 
                 conf_1d = torch.ones_like(self.features['seq'])*float(self.args['tmpl_conf'])
                 conf_1d[~self.features['mask_str'][0]] = 0 # zero confidence for places where structure is masked
@@ -390,6 +405,21 @@ class SEQDIFF_sampler:
                     self.features['mask_seq'] = torch.zeros(self.features['seq'].shape[0])[None].bool()
                 if self.features['mask_str'].shape[1] == 0:
                     self.features['mask_str'] = torch.zeros(self.features['xyz_t'].shape[2])[None].bool()
+                
+                if self.args['sequence'] not in ['',None]:
+                    print('Merging input sequence with contigs...')
+
+                    allowable_aas = [x for x in self.conversion[:-1]]
+                    for x in self.args['sequence']: assert x in allowable_aas, f'Amino Acid {x} is undefinded, please only use standart 20 AAs'
+
+                    loaded_seq = [self.conversion.index(x) for x in self.args['sequence']]
+
+                    assert len(loaded_seq) == self.features['seq'].shape[0], f'Your input contigs (len {self.features["seq"].shape[0]}) and sequence (len {len(loaded_seq)}) do not match'
+
+                    for i,x in enumerate(loaded_seq):
+                        if x != self.conversion.index('X'):
+                            self.features['seq'][i] = x
+                            self.features['mask_seq'][0][i] = True
 
                 idx_pdb = []
                 chains_used = [self.features['parsed_pdb']['pdb_idx'][0][0]]
@@ -415,30 +445,58 @@ class SEQDIFF_sampler:
                 
             else:
                 print('running in partial diffusion mode, with no trb input, diffusing whole input')
-                self.features['seq'] = torch.from_numpy(self.features['parsed_pdb']['seq'])
-                self.features['xyz_t'] = torch.from_numpy(self.features['parsed_pdb']['xyz'][:,:,:])[None,None,...]
-
                 if self.args['contigs'] in [('0'),(0),['0'],[0]]:
                     print('no contigs given partially diffusing everything')
+                    self.features['seq'] = torch.from_numpy(self.features['parsed_pdb']['seq'])
+                    self.features['xyz_t'] = torch.from_numpy(self.features['parsed_pdb']['xyz'][:,:,:])[None,None,...]
                     self.features['mask_str'] = torch.zeros(self.features['xyz_t'].shape[2]).long()[None,:].bool()
                     self.features['mask_seq'] = torch.zeros(self.features['seq'].shape[0]).long()[None,:].bool()
                     self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
+                    
+                    idx_pdb = []
+                    chains_used = [self.features['parsed_pdb']['pdb_idx'][0][0]]
+                    idx_jump = 0
+                    for i,x in enumerate(self.features['parsed_pdb']['pdb_idx']):
+                        if x[0] not in chains_used:
+                            chains_used.append(x[0])
+                            idx_jump += 200
+                        idx_pdb.append(idx_jump+i)
+
+                    self.features['idx_pdb'] = torch.tensor(idx_pdb)[None,:]
+
                 else:
                     print('found contigs setting up masking for partial diffusion')
+                    # process contigs and generate masks
                     self.features['mask_str'] = torch.from_numpy(self.features['rm'].inpaint_str)[None,:]
                     self.features['mask_seq'] = torch.from_numpy(self.features['rm'].inpaint_seq)[None,:]
                     self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
 
-                idx_pdb = []
-                chains_used = [self.features['parsed_pdb']['pdb_idx'][0][0]]
-                idx_jump = 0
-                for i,x in enumerate(self.features['parsed_pdb']['pdb_idx']):
-                    if x[0] not in chains_used:
-                        chains_used.append(x[0])
-                        idx_jump += 200
-                    idx_pdb.append(idx_jump+i)
+                    seq_input = torch.from_numpy(self.features['parsed_pdb']['seq'])
+                    xyz_input = torch.from_numpy(self.features['parsed_pdb']['xyz'][:,:,:])
 
-                self.features['idx_pdb'] = torch.tensor(idx_pdb)[None,:]
+                    self.features['xyz_t'] = torch.full((1,1,len(self.features['rm'].ref),27,3), np.nan)
+                    self.features['xyz_t'][:,:,self.features['rm'].hal_idx0,:14,:] = xyz_input[self.features['rm'].ref_idx0,:14,:][None, None,...]
+                    self.features['seq'] = torch.full((1,len(self.features['rm'].ref)),20).squeeze()
+                    self.features['seq'][self.features['rm'].hal_idx0] = seq_input[self.features['rm'].ref_idx0]
+                    
+                    self.features['idx_pdb'] = torch.from_numpy(np.array(self.features['rm'].rf)).int()[None,:]
+                                    
+                if self.args['sequence'] not in ['',None]:
+                    print('Merging input sequence with contigs...')
+
+                    allowable_aas = [x for x in self.conversion[:-1]]
+                    for x in self.args['sequence']: assert x in allowable_aas, f'Amino Acid {x} is undefinded, please only use standart 20 AAs'
+
+                    loaded_seq = [self.conversion.index(x) for x in self.args['sequence']]
+
+                    assert len(loaded_seq) == self.features['seq'].shape[0], f'Your input contigs (len {self.features["seq"].shape[0]}) and sequence (len {len(loaded_seq)}) do not match'
+
+                    for i,x in enumerate(loaded_seq):
+                        if x != self.conversion.index('X'):
+                            self.features['seq'][i] = x
+                            self.features['mask_seq'][0][i] = True
+
+
                 conf_1d = torch.ones_like(self.features['seq'])
                 conf_1d[~self.features['mask_str'][0]] = 0
                 self.features['seq_hot'], self.features['msa'], \
