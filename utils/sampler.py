@@ -288,20 +288,35 @@ class SEQDIFF_sampler:
         if self.args['pdb'] == None and self.args['sequence'] not in ['', None]:
             print('Preparing sequence input')
 
-            allowable_aas = [x for x in self.conversion[:-1]]
-            for x in self.args['sequence']: assert x in allowable_aas, f'Amino Acid {x} is undefinded, please only use standart 20 AAs'
-            self.features['seq'] = torch.tensor([self.conversion.index(x) for x in self.args['sequence']])
-            self.features['xyz_t'] = torch.full((1,1,len(self.args['sequence']),27,3), np.nan)
-            self.features['mask_str'] = torch.zeros(len(self.args['sequence'])).long()[None,:].bool()
+            chain_sep = []
+            aa_list = []
+            for i,x in enumerate(self.args['sequence']):
+                if x == '/':
+                    chain_sep.append(i)
+                elif x in self.conversion:
+                    aa_list.append(self.conversion.index(x))
+                else:
+                    raise Exception('Not an allowable amino acid')
+            chain_sep = [x-i for i,x in enumerate(chain_sep)]
+            aa_seq = ''.join([self.conversion[x] for x in aa_list])
+
+            self.features['seq'] = torch.tensor(aa_list)
+            self.features['xyz_t'] = torch.full((1,1,len(aa_seq),27,3), np.nan)
+            self.features['mask_str'] = torch.zeros(len(aa_seq)).long()[None,:].bool()
             
             #added check for if in partial diffusion mode will mask
             if self.args['sampling_temp'] == 1.0:
-                self.features['mask_seq'] = torch.tensor([0 if x == 'X' else 1 for x in self.args['sequence']]).long()[None,:].bool()
+                self.features['mask_seq'] = torch.tensor([0 if x == 'X' else 1 for x in aa_seq]).long()[None,:].bool()
             else:
-                self.features['mask_seq'] = torch.zeros(len(self.args['sequence'])).long()[None,:].bool()
+                self.features['mask_seq'] = torch.zeros(len(aa_seq)).long()[None,:].bool()
 
             self.features['blank_mask'] = torch.ones(self.features['mask_str'].size()[-1])[None,:].bool()
-            self.features['idx_pdb'] = torch.tensor([i for i in range(len(self.args['sequence']))])[None,:]
+            
+
+            self.features['idx_pdb'] = torch.arange(self.features['seq'].shape[0])[None,:]
+            for x in chain_sep:
+                self.features['idx_pdb'][:,x:] += 200
+
             conf_1d = torch.ones_like(self.features['seq'])
             conf_1d[~self.features['mask_str'][0]] = 0
             self.features['seq_hot'], self.features['msa'], \
@@ -314,7 +329,18 @@ class SEQDIFF_sampler:
         
             self.max_t = int(self.args['T']*self.args['sampling_temp'])
             
-            self.features['pdb_idx'] = [('A',i+1) for i in range(len(self.args['sequence']))]
+            possible_chains = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+            on_chain = 0
+            chain_idx = 1
+            pdb_idx = []
+            for i in range(len(aa_seq)):
+                if i != 0 and self.features['idx_pdb'][:,i] - self.features['idx_pdb'][:,i-1] > 200:
+                    on_chain += 1
+                    chain_idx = 1
+                pdb_idx.append((possible_chains[on_chain],chain_idx))
+                chain_idx += 1
+            
+            self.features['pdb_idx'] = pdb_idx
             self.features['trb_d']['inpaint_str'] = self.features['mask_str'][0]
             self.features['trb_d']['inpaint_seq'] = self.features['mask_seq'][0]
 
@@ -880,7 +906,6 @@ class SEQDIFF_sampler:
        
         # if running in symmetry mode an extra pass through the model will happen to ensure that the sequece is fully symmetrized
         
-
         # get items from best plddt step
         if self.args['save_best_plddt']:
             self.features['seq'] = torch.clone(self.features['best_seq'])
@@ -1036,6 +1061,7 @@ class cleavage_foldswitch_SAMPLER(SEQDIFF_sampler):
         
             self.max_t = int(self.args['T']*self.args['sampling_temp'])
             
+            possible_chains = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
             self.features['pdb_idx'] = [('A',i+1) for i in range(len(self.args['sequence']))]
             self.features['trb_d']['inpaint_str'] = self.features['mask_str'][0]
             self.features['trb_d']['inpaint_seq'] = self.features['mask_seq'][0]
