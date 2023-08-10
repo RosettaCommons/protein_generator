@@ -1026,7 +1026,7 @@ class cleavage_foldswitch_SAMPLER(SEQDIFF_sampler):
         if self.features['sym'] > 1:
             print(f"Input sequence symmetry {self.features['sym']}")
        
-        assert (self.args['contigs'] in [('0'),(0),['0'],[0]] ) ^ (self.args['sequence'] in ['',None]),\
+        assert (self.args['contigs'] not in [('0'),(0),['0'],[0]] ) and (self.args['sequence'] not in ['',None]),\
                 f'You are specifying contigs ({self.args["contigs"]}) and sequence ({self.args["sequence"]})  (or neither), please specify one or the other'
         
         # initialize trb dictionary
