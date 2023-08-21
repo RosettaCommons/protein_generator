@@ -113,7 +113,7 @@ class SEQDIFF_sampler:
         self.SE3_param_full = SE3_param_full
         self.SE3_param_topk = SE3_param_topk
         self.use_potentials = False
-        self.reset_design_num()
+        self.design_num = self.args["start_num"]
     
     def set_args(self, args):
         '''
