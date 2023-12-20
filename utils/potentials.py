@@ -65,11 +65,11 @@ class AACompositionalBias(Potential):
                 aa_weights = json.load(f)
         else:
             aa_weights = {}
+        
+        aa_weights_to_add = [0 for l in range(21)]
 
         for k,v in aa_weights.items():
             aa_weights_to_add[conversion.index(k)] = v
-        
-        aa_weights_to_add = [0 for l in range(21)]
         
         self.aa_weights_to_add = torch.tensor(aa_weights_to_add)[None].repeat(self.L,1).to(self.DEVICE, non_blocking=True)
 
@@ -127,6 +127,9 @@ class AACompositionalBias(Potential):
             self.aa_max_potential = 0 #just a place holder so not None 
             assert sum([f for aa,f in self.aa_comp]) <= 1, f'total sequence fraction specified in aa_composition is > 1'
             
+        elif self.aa_weights_json != None:
+            self.aa_max_potential = None
+
         else:
             sys.exit(f'You are missing an argument to use the aa_bias potential')
     
