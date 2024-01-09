@@ -125,8 +125,6 @@ class SEQDIFF_sampler:
         '''
         self.args = args
         self.diffuser_init()
-        if self.args['potentials'] not in ['', None]:
-            self.potential_init()
         
     def reset_design_num(self):
         '''
@@ -279,9 +277,6 @@ class SEQDIFF_sampler:
         if self.features['sym'] > 1:
             print(f"Input sequence symmetry {self.features['sym']}")
        
-        if (self.args['contigs'] in [('0'),(0),['0'],[0]] ) ^ (self.args['sequence'] in ['',None]):
-            print(f'You are specifying contigs ({self.args["contigs"]}) and sequence ({self.args["sequence"]}), if the lengths dont match an error will be thrown')
-        
         # initialize trb dictionary
         self.features['trb_d'] = {}
         

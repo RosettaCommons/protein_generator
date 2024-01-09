@@ -1,1 +1,2 @@
-python ./inference.py --input_json json_weighted_args.json 
+# run from base protein_generator directory
+python inference.py --input_json examples/reduced_aa_args.json 
