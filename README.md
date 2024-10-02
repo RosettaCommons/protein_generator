@@ -1,7 +1,7 @@
 # ProteinGenerator: Generate sequence-structure pairs with RoseTTAFold
-<img src='./utils/figs/seqdiff_anim_720p.gif' width='600' style="vertical-align:middle">
-
 This is the Github repository for the [PROTEIN GENERATOR PAPER](https://www.nature.com/articles/s41587-024-02395-w)
+
+<img src='./utils/figs/seqdiff_anim_720p.gif' width='600' style="horizontal-align:middle">
 
 ## Getting Started
 The easiest way to get started is with [PROTEIN GENERATOR](https://huggingface.co/spaces/merle/PROTEIN_GENERATOR) a HuggingFace space where you can play around with the model!
