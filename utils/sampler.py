@@ -83,8 +83,8 @@ for param, value in SE3_PARAMS.items():
 MODEL_PARAM['SE3_param_full'] = SE3_param_full
 MODEL_PARAM['SE3_param_topk'] = SE3_param_topk
 
-DEFAULT_CKPT = './SEQDIFF_221219_equalTASKS_nostrSELFCOND_mod30.pt'
-t1d_29_CKPT = './SEQDIFF_230205_dssp_hotspots_25mask_EQtasks_mod30.pt'
+DEFAULT_CKPT = '/'.join(script_dir.split('/')[:-1])+'/model/SEQDIFF_221219_equalTASKS_nostrSELFCOND_mod30.pt'
+t1d_29_CKPT = '/'.join(script_dir.split('/')[:-1])+'/model/SEQDIFF_230205_dssp_hotspots_25mask_EQtasks_mod30.pt'
 
 class SEQDIFF_sampler:
     
@@ -234,7 +234,7 @@ class SEQDIFF_sampler:
             print('WARNING: couldn\'t find checkpoint')
         
         if not os.path.exists(self.args['checkpoint']):
-            raise Exception(f'MODEL NOT FOUND!\nTo down load models please run the following in the main directory:\nwget http://files.ipd.uw.edu/pub/sequence_diffusion/checkpoints/SEQDIFF_230205_dssp_hotspots_25mask_EQtasks_mod30.pt\nwget http://files.ipd.uw.edu/pub/sequence_diffusion/checkpoints/SEQDIFF_221219_equalTASKS_nostrSELFCOND_mod30.pt')
+            raise Exception(f'MODEL NOT FOUND!\nTo download models please run the following in the main directory:\nwget http://files.ipd.uw.edu/pub/sequence_diffusion/checkpoints/SEQDIFF_230205_dssp_hotspots_25mask_EQtasks_mod30.pt -P model \nwget http://files.ipd.uw.edu/pub/sequence_diffusion/checkpoints/SEQDIFF_221219_equalTASKS_nostrSELFCOND_mod30.pt -P model')
 
         self.ckpt = torch.load(self.args['checkpoint'], map_location=self.DEVICE)
 
